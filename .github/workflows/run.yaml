@@ -1,0 +1,79 @@
+name: Two Tier App
+on: push
+permissions: # because use role-to-assume to login aws
+  id-token: write
+  contents: read
+# on:
+#   project:
+#     types: deleted
+jobs:
+  database-backend:
+    runs-on: ubuntu-latest
+    outputs:
+      backend_url: ${{ steps.rds-ec2-outputs.outputs.BACKEND_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'app/server/**'
+      - uses: docker/login-action@v3
+        if: steps.filter.outputs.backend == 'true'
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: push backend image to hub if there are any updadte in backend
+        if: steps.filter.outputs.backend == 'true'
+        run: |
+          docker build -f Dockerfile -t susanssky/devops:two-tier-app .
+          docker push susanssky/devops:two-tier-app
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false # for get the terraform output value
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ROLE_TO_ASSUME }}
+          aws-region: eu-west-2
+      - name: Terraform command
+        working-directory: ./terraform/1-database-backend
+        run: |
+          terraform init
+          terraform fmt -check
+          terraform apply -auto-approve -var "database_username=${{ secrets.DB_USER }}" -var "database_password=${{ secrets.DB_PW }}" -var "docker_id=${{ secrets.DOCKER_USER }}" -var "docker_token=${{ secrets.DOCKER_TOKEN }}" -var "slack_workspace_id=${{ secrets.SLACK_WORKSPACE_ID }}" -var "slack_channel_id=${{ secrets.SLACK_CHANNEL_ID }}"
+      - name: save the outputs value from tf to the outputs in this job
+        id: rds-ec2-outputs
+        working-directory: ./terraform/1-database-backend
+        run: echo "BACKEND_URL=$(terraform output -raw backend_url)" >> $GITHUB_OUTPUT
+
+  frontend:
+    needs: [database-backend]
+    runs-on: ubuntu-latest
+    env:
+      BACKEND_URL: ${{ needs.database-backend.outputs.backend_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create env file
+        working-directory: ./app/client
+        run: |
+          echo "VITE_SERVER_URL=${BACKEND_URL}" > .env
+          cat .env
+      - name: build static frontend website
+        working-directory: ./app/client
+        run: |
+          npm ci
+          npm run build
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ROLE_TO_ASSUME }}
+          aws-region: eu-west-2
+      - name: Terraform command
+        working-directory: ./terraform/2-frontend
+        run: |
+          terraform init
+          terraform fmt -check
+          terraform apply -auto-approve

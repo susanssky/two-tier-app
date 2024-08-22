@@ -1,0 +1,7 @@
+**/node_modules/
+**/database-data
+**/.env*
+**/.DS_Store
+**/.dockerignore
+**/.gitignore
+**/Dockerfile*
